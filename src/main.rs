@@ -12,17 +12,21 @@
 //!
 //! | Variable        | Default            |
 //! |-----------------|--------------------|
-//! | `LISTEN_ADDR`   | `0.0.0.0:8080`     |
+//! | `LISTEN_ADDR`   | `0.0.0.0`          |
+//! | `LISTEN_PORT`   | `8080`             |
 //! | `UPSTREAM_HOST` | `127.0.0.1`        |
 //! | `UPSTREAM_PORT` | `1234`             |
 //!
 //! The open/close patterns and their replacements can be customised by editing
-//! `ReplacementConfig::default()`.
+//! `ReplacementConfig::default()`. Connection settings (listen address, port,
+//! upstream host, upstream port) can be customized via `ConnectionConfig::default()`.
+//!
+//! Editing `EnvConfig::default()` to change the environment variable names to read from.
 
 use std::{
     convert::Infallible,
     env,
-    net::{SocketAddr, ToSocketAddrs},
+    net::SocketAddr,
     sync::Arc,
 };
 
@@ -40,16 +44,67 @@ use serde_json::Value;
 use tracing::{error, info};
 
 /// ---------------------------------------------------------------------------
+/// Default values
+/// ---------------------------------------------------------------------------
+
+/// The default configuration for tag replacement rules.
+///
+/// Edit these values to change the defaults.
+impl Default for ReplacementConfig {
+    fn default() -> Self {
+        Self {
+            // Pattern that marks the start of a block to be replaced.
+            open_pattern: "<|channel|>analysis<|message|>",
+            // Pattern that marks the end of a block to be replaced.
+            close_pattern: "<|end|><|start|>assistant<|channel|>final<|message|>",
+            // New open pattern to use.
+            open_tag: "<think>",
+            // New close pattern to use.
+            close_tag: "</think>",
+        }
+    }
+}
+
+/// The default configuration for connections.
+///
+/// Edit these values to change the defaults.
+impl Default for ConnectionConfig {
+    fn default() -> Self {
+        Self {
+            listen_addr: "0.0.0.0".into(),
+            listen_port: 8080,
+            upstream_host: "127.0.0.1".into(),
+            upstream_port: 1234,
+        }
+    }
+}
+
+/// Environment variable name configuration.
+///
+/// Allows customizing the names of environment variables.
+/// Edit these values to change the defaults.
+impl Default for EnvConfig {
+    fn default() -> Self {
+        Self {
+            // Name of the env var for listen address.
+            listen_addr: "LISTEN_ADDR",
+            // Name of the env var for listen port.
+            listen_port: "LISTEN_PORT",
+            // Name of the env var for upstream host.
+            upstream_host: "UPSTREAM_HOST",
+            // Name of the env var for upstream port.
+            upstream_port: "UPSTREAM_PORT",
+        }
+    }
+}
+
+/// ---------------------------------------------------------------------------
 /// Configuration
 /// ---------------------------------------------------------------------------
 #[derive(Debug, Clone)]
 pub struct ProxyConfig {
-    /// Host of the upstream service.
-    pub upstream_host: String,
-    /// Port of the upstream service.
-    pub upstream_port: u16,
-    /// Address on which this proxy listens.
-    pub listen_addr: SocketAddr,
+    /// Configuration for connections.
+    pub connect_cfg: ConnectionConfig,
     /// Replacement rules for chat completions.
     pub replace_cfg: ReplacementConfig,
 }
@@ -57,36 +112,42 @@ pub struct ProxyConfig {
 impl ProxyConfig {
     /// Build a configuration from environment variables.
     ///
-    /// * `LISTEN_ADDR` – default `"0.0.0.0:8080"`.
-    /// * `UPSTREAM_HOST` – default `"127.0.0.1"`.
-    /// * `UPSTREAM_PORT` – default `1234`.
+    /// Use default values if the environment variable is not defined.
     pub fn from_env() -> Self {
-        // Helper to turn a string like "0.0.0.0:8080" into a SocketAddr.
-        fn parse_socket_addr(s: &str) -> SocketAddr {
-            s.to_socket_addrs()
-                .expect("invalid LISTEN_ADDR")
-                .next()
-                .expect("LISTEN_ADDR resolved to no address")
-        }
+        let conn_defaults = ConnectionConfig::default();
+        let env_cfg = EnvConfig::default();
 
-        let listen = env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
-        let upstream_host = env::var("UPSTREAM_HOST").unwrap_or_else(|_| "127.0.0.1".into());
-        let upstream_port = env::var("UPSTREAM_PORT")
+        // Override with environment variables if set.
+        let listen_addr = env::var(env_cfg.listen_addr)
+            .unwrap_or_else(|_| conn_defaults.listen_addr.clone());
+        let listen_port = env::var(env_cfg.listen_port)
+            .ok()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(conn_defaults.listen_port);
+
+        let upstream_host = env::var(env_cfg.upstream_host)
+            .unwrap_or_else(|_| conn_defaults.upstream_host.clone());
+        let upstream_port = env::var(env_cfg.upstream_port)
             .ok()
             .and_then(|p| p.parse().ok())
-            .unwrap_or(1234);
+            .unwrap_or(conn_defaults.upstream_port);
 
         Self {
-            upstream_host,
-            upstream_port,
-            listen_addr: parse_socket_addr(&listen),
+            connect_cfg: ConnectionConfig {
+                listen_addr,
+                listen_port,
+                upstream_host,
+                upstream_port,
+            },
             replace_cfg: ReplacementConfig::default(),
         }
     }
 
     /// Authority string used for the `Host` header (e.g. `"127.0.0.1:1234"`).
     fn upstream_authority(&self) -> String {
-        format!("{}:{}", self.upstream_host, self.upstream_port)
+        format!("{}:{}",
+            self.connect_cfg.upstream_host,
+            self.connect_cfg.upstream_port)
     }
 
     /// Construct a full URI that points to the upstream service while preserving
@@ -99,7 +160,7 @@ impl ProxyConfig {
 }
 
 /// ---------------------------------------------------------------------------
-/// Replacement rules (open/close patterns → tags)
+/// Replacement rules
 /// ---------------------------------------------------------------------------
 #[derive(Debug, Clone)]
 pub struct ReplacementConfig {
@@ -109,15 +170,30 @@ pub struct ReplacementConfig {
     pub close_tag: &'static str,
 }
 
-impl Default for ReplacementConfig {
-    fn default() -> Self {
-        Self {
-            open_pattern: "<|channel|>analysis<|message|>",
-            close_pattern: "<|end|><|start|>assistant<|channel|>final<|message|>",
-            open_tag: "<think>",
-            close_tag: "</think>",
-        }
-    }
+/// ---------------------------------------------------------------------------
+/// Connection configuration
+/// ---------------------------------------------------------------------------
+#[derive(Debug, Clone)]
+pub struct ConnectionConfig {
+    /// Listening address for the proxy.
+    pub listen_addr: String,
+    /// Port on which this proxy listens.
+    pub listen_port: u16,
+    /// Host of the upstream service.
+    pub upstream_host: String,
+    /// Port of the upstream service.
+    pub upstream_port: u16,
+}
+
+/// ---------------------------------------------------------------------------
+/// Environment variable configuration
+/// ---------------------------------------------------------------------------
+#[derive(Debug, Clone)]
+pub struct EnvConfig {
+    pub listen_addr: &'static str,
+    pub listen_port: &'static str,
+    pub upstream_host: &'static str,
+    pub upstream_port: &'static str,
 }
 
 /// ---------------------------------------------------------------------------
@@ -432,12 +508,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cfg = Arc::new(ProxyConfig::from_env());
 
     // The address is needed *before* we move `cfg` into the service factory.
-    let listen_addr = cfg.listen_addr;
+    let listen_addr_str = format!("{}:{}",
+        cfg.connect_cfg.listen_addr,
+        cfg.connect_cfg.listen_port);
+    let listen_addr: SocketAddr = listen_addr_str.parse().expect("invalid LISTEN_ADDR");
 
     info!("proxy listening on http://{}", listen_addr);
     info!(
         "forwarding requests to http://{}:{}",
-        cfg.upstream_host, cfg.upstream_port
+        cfg.connect_cfg.upstream_host,
+        cfg.connect_cfg.upstream_port
     );
 
     // Shared hyper client – cheap to clone for each request.
