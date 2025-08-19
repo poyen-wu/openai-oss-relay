@@ -17,79 +17,38 @@ The proxy reads its settings from environment variables. The defaults are shown 
 ### Architecture Diagram
 
 ```mermaid
-flowchart TD
-    %% -------------------------------------------------
-    %% Entry point
-    %% -------------------------------------------------
-    A[main] --> B[ProxyConfig::from_env()]
-    B --> C[Initialize logger &amp; Hyper client]
-    C --> D[Server::bind(listen_addr)]
-    D --> E[make_service_fn -> forward_request]
+sequenceDiagram
+    participant Client as User/Client
+    participant Proxy as Reverse Proxy
+    participant Upstream as OpenAI Server
 
-    %% -------------------------------------------------
-    %% Request routing
-    %% -------------------------------------------------
-    E --> F{Request path}
-    F -- non-chat endpoint --> G[proxy request unchanged]
-    F -- "/v1/chat/completions" --> H[handle_chat_completions]
+    Note over Client,Upstream: Non-chat requests (unchanged)
+    Client->>Proxy: Request (non-chat endpoint)
+    Proxy->>Upstream: Forwarded request
+    Upstream-->>Proxy: Response
+    Proxy-->>Client: Unchanged response
 
-    %% -------------------------------------------------
-    %% Chat completion handling
-    %% -------------------------------------------------
-    H --> I{Response Content-Type}
-    I -- application/json --> J[rewrite_full_json]
-    I -- text/event-stream --> K[rewrite_streaming]
+    Note over Client,Upstream: Chat completion (JSON)
+    Client->>Proxy: POST /v1/chat/completions
+    Proxy->>Upstream: Forwarded request
+    Upstream-->>Proxy: JSON response
+    Proxy->>Proxy: Rewrite choices[*].message.content<br/>replace patterns with tags
+    Proxy-->>Client: Rewritten JSON response
 
-    %% -------------------------------------------------
-    %% JSON rewrite path
-    %% -------------------------------------------------
-    J --> L[Parse JSON -> iterate choices]
-    L --> M[PatternReplacer::rewrite on each message.content]
-    M --> N[Serialize JSON & send response]
-
-    %% -------------------------------------------------
-    %% SSE (stream) rewrite path
-    %% -------------------------------------------------
-    K --> O[SseTransformer stream wrapper]
-    O --> P[Buffer until \\n\\n event boundary]
-    P --> Q[PatternReplacer::rewrite on event payload]
-    Q --> R[Emit rewritten Bytes -> client]
-
-    %% -------------------------------------------------
-    %% Common response flow back to client
-    %% -------------------------------------------------
-    G --> S[Send upstream response unchanged]
-    N --> T[Send modified JSON response]
-    R --> T
-
-    %% -------------------------------------------------
-    %% Configuration structs (subgraph)
-    %% -------------------------------------------------
-    subgraph Config[Configuration]
-        direction TB
-        B1[EnvConfig::default()] --> B2[Read env vars]
-        B3[ConnectionConfig::default()] --> B4[listen_addr, listen_port, upstream_host, upstream_port]
-        B5[ReplacementConfig::default()] --> B6[open_pattern, close_pattern, open_tag, close_tag]
+    Note over Client,Upstream: Chat completion (SSE stream)
+    Client->>Proxy: POST /v1/chat/completions<br/>Accept: text/event-stream
+    Proxy->>Upstream: Forwarded request
+    Upstream-->>Proxy: SSE stream response
+    loop For each SSE event
+        Proxy->>Proxy: Buffer until \\n\\n delimiter<br/>Rewrite data field content
     end
-    B --> B1          %% connect main flow to the config subgraph
+    Proxy-->>Client: Rewritten SSE stream
 
-    %% -------------------------------------------------
-    %% Pattern replacer component (subgraph)
-    %% -------------------------------------------------
-    subgraph Replacer[PatternReplacer]
-        direction TB
-        X1[opened flag] --> X2[rewrite(input)]
-        X2 -->|if !opened && contains open_pattern| Y1[replace first open_pattern -> open_tag, set opened=true]
-        Y1 -->|if opened && contains close_pattern| Y2[replace all close_pattern -> close_tag, set opened=false]
+    Note over Proxy,Upstream: Configuration flow
+    rect rgb(240, 240, 240)
+        Proxy->>Proxy: Load from environment<br/>LISTEN_ADDR/PORT<br/>UPSTREAM_HOST/PORT
+        Proxy->>Proxy: Apply replacement rules<br/>open/close patterns & tags
     end
-    M --> X1          %% feed rewritten messages into the replacer
-    Q --> X1
-
-    %% -------------------------------------------------
-    %% Final output
-    %% -------------------------------------------------
-    T --> U[Client receives response]
-    S --> U
 ```
 
 | Variable        | Default   |
