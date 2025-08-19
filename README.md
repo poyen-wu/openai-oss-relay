@@ -37,8 +37,8 @@ flowchart TD
     %% Chat completion handling
     %% -------------------------------------------------
     H --> I{Response Content-Type}
-    I -- "application/json" --> J[rewrite_full_json]
-    I -- "text/event-stream" --> K[rewrite_streaming]
+    I -- application/json --> J[rewrite_full_json]
+    I -- text/event-stream --> K[rewrite_streaming]
 
     %% -------------------------------------------------
     %% JSON rewrite path
@@ -63,29 +63,27 @@ flowchart TD
     R --> T
 
     %% -------------------------------------------------
-    %% Configuration structs (shown as subgraph for clarity)
+    %% Configuration structs (subgraph)
     %% -------------------------------------------------
-    subgraph Config [Configuration]
+    subgraph Config[Configuration]
         direction TB
         B1[EnvConfig::default()] --> B2[Read env vars]
         B3[ConnectionConfig::default()] --> B4[listen_addr, listen_port, upstream_host, upstream_port]
         B5[ReplacementConfig::default()] --> B6[open_pattern, close_pattern, open_tag, close_tag]
     end
-    %% Connect the main flow to a concrete node inside the subgraph (B1)
-    B --> B1
+    B --> B1          %% connect main flow to the config subgraph
 
     %% -------------------------------------------------
-    %% Pattern replacer component
+    %% Pattern replacer component (subgraph)
     %% -------------------------------------------------
-    subgraph Replacer [PatternReplacer]
+    subgraph Replacer[PatternReplacer]
         direction TB
         X1[opened flag] --> X2[rewrite(input)]
         X2 -->|if !opened && contains open_pattern| Y1[replace first open_pattern -> open_tag, set opened=true]
         Y1 -->|if opened && contains close_pattern| Y2[replace all close_pattern -> close_tag, set opened=false]
     end
-    %% Multiple‑source edges expressed as two separate arrows (v8 compatible)
-    M --> Replacer
-    Q --> Replacer
+    M --> X1          %% feed rewritten messages into the replacer
+    Q --> X1
 
     %% -------------------------------------------------
     %% Final output
