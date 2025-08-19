@@ -71,7 +71,7 @@ flowchart TD
         B3[ConnectionConfig::default()] --> B4[listen_addr, listen_port, upstream_host, upstream_port]
         B5[ReplacementConfig::default()] --> B6[open_pattern, close_pattern, open_tag, close_tag]
     end
-    %% Connect to a concrete node inside the subgraph (B1) instead of the cluster itself
+    %% Connect the main flow to a concrete node inside the subgraph (B1)
     B --> B1
 
     %% -------------------------------------------------
@@ -83,7 +83,7 @@ flowchart TD
         X2 -->|if !opened && contains open_pattern| Y1[replace first open_pattern -> open_tag, set opened=true]
         Y1 -->|if opened && contains close_pattern| Y2[replace all close_pattern -> close_tag, set opened=false]
     end
-    %% Multiple sources → single target: use two explicit edges for compatibility
+    %% Multiple‑source edges expressed as two separate arrows (v8 compatible)
     M --> Replacer
     Q --> Replacer
 
