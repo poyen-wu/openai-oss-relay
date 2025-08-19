@@ -14,6 +14,65 @@ A tiny reverse‑proxy that forwards HTTP requests to an upstream service while 
 
 The proxy reads its settings from environment variables. The defaults are shown below:
 
+### Architecture Diagram
+
+```mermaid
+flowchart TD
+    %% Entry point
+    A[main] --> B[ProxyConfig::from_env()]
+    B --> C[Initialize logger & Hyper client]
+    C --> D[Server::bind(listen_addr)]
+    D --> E[make_service_fn → forward_request]
+
+    %% Request routing
+    E --> F{Request path}
+    F -- non‑chat endpoint --> G[proxy request unchanged]
+    F -- "/v1/chat/completions" --> H[handle_chat_completions]
+
+    %% Chat completion handling
+    H --> I{Response Content-Type}
+    I -- "application/json" --> J[rewrite_full_json]
+    I -- "text/event-stream" --> K[rewrite_streaming]
+
+    %% JSON rewrite path
+    J --> L[Parse JSON → iterate choices]
+    L --> M[PatternReplacer::rewrite on each message.content]
+    M --> N[Serialize JSON & send response]
+
+    %% SSE (stream) rewrite path
+    K --> O[SseTransformer stream wrapper]
+    O --> P[Buffer until \n\n event boundary]
+    P --> Q[PatternReplacer::rewrite on event payload]
+    Q --> R[Emit rewritten Bytes → client]
+
+    %% Common response flow back to client
+    G --> S[Send upstream response unchanged]
+    N --> T[Send modified JSON response]
+    R --> T
+
+    %% Configuration structs (shown as subgraph for clarity)
+    subgraph Config [Configuration]
+        direction TB
+        B1[EnvConfig::default()] --> B2[Read env vars]
+        B3[ConnectionConfig::default()] --> B4[listen_addr, listen_port, upstream_host, upstream_port]
+        B5[ReplacementConfig::default()] --> B6[open_pattern, close_pattern, open_tag, close_tag]
+    end
+    B --> Config
+
+    %% Pattern replacer component
+    subgraph Replacer [PatternReplacer]
+        direction TB
+        X1[opened flag] --> X2[rewrite(input)]
+        X2 -->|if !opened && contains open_pattern| Y1[replace first open_pattern → open_tag, set opened=true]
+        Y1 -->|if opened && contains close_pattern| Y2[replace all close_pattern → close_tag, set opened=false]
+    end
+    M & Q --> Replacer
+
+    %% Final output
+    T & S --> U[Client receives response]
+
+```
+
 | Variable        | Default   |
 |-----------------|-----------|
 | `LISTEN_ADDR`   | `0.0.0.0` |
